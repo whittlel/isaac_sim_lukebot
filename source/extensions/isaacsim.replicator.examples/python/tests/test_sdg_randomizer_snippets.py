@@ -23,7 +23,7 @@ import omni.kit.test
 ################################################################################
 
 
-class TestRandomizerSnippets(omni.kit.test.AsyncTestCase):
+class TestSDGRandomizerSnippets(omni.kit.test.AsyncTestCase):
     async def setUp(self):
         await omni.usd.get_context().new_stage_async()
         await omni.kit.app.get_app().next_update_async()
@@ -158,10 +158,10 @@ class TestRandomizerSnippets(omni.kit.test.AsyncTestCase):
             stage = omni.usd.get_context().get_stage()
             shapes = []
             for prim in stage.Traverse():
-                sem_dict = get_labels(prim)
-                sem_values = sem_dict.values()
-                if ("class", "cube") in sem_values or ("class", "sphere") in sem_values:
-                    shapes.append(prim)
+                labels = get_labels(prim)
+                if class_labels := labels.get("class"):
+                    if "cube" in class_labels or "sphere" in class_labels:
+                        shapes.append(prim)
             return shapes
 
         shapes = get_shapes()
