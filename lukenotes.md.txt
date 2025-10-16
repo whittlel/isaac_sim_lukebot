@@ -1,0 +1,15 @@
+ Basic Demos:
+  - add_frankas.py - Franka robot arm simulation
+  - simulate_robot.py - Robot control examples
+  - visual_materials.py - Material and rendering demos
+
+  Robot Examples:
+  - UR10e robot manipulation (source/standalone_examples/api/isaacsim.robot.manipulators/ur10e/)
+  - Humanoid and quadruped robots
+  - Pick and place tasks
+
+
+
+ To run any demo:
+  cd _build/windows-x86_64/release
+  ./python.bat ../../../source/standalone_examples/api/[category]/[demo_name].py
