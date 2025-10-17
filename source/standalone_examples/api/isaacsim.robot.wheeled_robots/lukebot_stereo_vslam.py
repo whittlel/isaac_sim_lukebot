@@ -23,21 +23,30 @@ from isaacsim.robot.wheeled_robots.robots.holonomic_robot_usd_setup import Holon
 from isaacsim.sensors.camera import Camera
 from pxr import Gf, Sdf, UsdGeom, UsdPhysics
 import omni.graph.core as og
+import usdrt.Sdf
 
 # Enable necessary extensions
 enable_extension("omni.isaac.sensor")
-enable_extension("omni.isaac.ros2_bridge")
-enable_extension("omni.isaac.core_nodes")
+
+# Try to enable ROS 2 Bridge - requires ROS 2 installed on system
+ROS2_AVAILABLE = False
+try:
+    enable_extension("isaacsim.ros2.bridge")
+    simulation_app.update()
+    ROS2_AVAILABLE = True
+    carb.log_info("ROS 2 Bridge extension enabled successfully")
+except Exception as e:
+    carb.log_warn(f"ROS 2 Bridge not available: {e}")
+    carb.log_warn("Stereo cameras will be created, but ROS 2 topic publishing will be skipped")
+    carb.log_warn("To enable ROS 2: Install ROS 2 Humble on your system")
 
 
 def create_stereo_camera_graph(left_camera_path, right_camera_path):
     """
-    Create OmniGraph action graph to publish stereo camera images to ROS 2
+    Create OmniGraph action graphs to publish stereo camera images to ROS 2
 
-    This creates the necessary nodes to:
-    1. Generate render products for both cameras
-    2. Publish RGB images for left and right cameras
-    3. Publish camera_info for both cameras
+    Uses viewport-based rendering pattern from Isaac Sim examples.
+    Creates separate action graphs for left and right cameras.
 
     Topics published:
     - /stereo_camera/left/image_raw
@@ -47,54 +56,101 @@ def create_stereo_camera_graph(left_camera_path, right_camera_path):
     """
 
     try:
-        carb.log_info("Creating ROS 2 stereo camera action graph...")
+        carb.log_info("Creating ROS 2 stereo camera action graphs...")
 
-        # Create action graph
-        (graph, nodes, _, _) = og.Controller.edit(
-            {"graph_path": "/World/StereoCamera_Graph", "evaluator_name": "execution"},
+        keys = og.Controller.Keys
+
+        # ========== LEFT CAMERA GRAPH ==========
+        carb.log_info("  Creating left camera graph...")
+        (left_graph, _, _, _) = og.Controller.edit(
             {
-                og.Controller.Keys.CREATE_NODES: [
-                    ("OnPlaybackTick", "omni.graph.action.OnPlaybackTick"),
-                    ("IsaacCreateRenderProductLeft", "omni.isaac.core_nodes.IsaacCreateRenderProduct"),
-                    ("IsaacCreateRenderProductRight", "omni.isaac.core_nodes.IsaacCreateRenderProduct"),
-                    ("ROS2CameraHelperLeft", "omni.isaac.ros2_bridge.ROS2CameraHelper"),
-                    ("ROS2CameraHelperRight", "omni.isaac.ros2_bridge.ROS2CameraHelper"),
+                "graph_path": "/World/StereoCamera_Left_Graph",
+                "evaluator_name": "push",
+                "pipeline_stage": og.GraphPipelineStage.GRAPH_PIPELINE_STAGE_ONDEMAND,
+            },
+            {
+                keys.CREATE_NODES: [
+                    ("OnTick", "omni.graph.action.OnTick"),
+                    ("createViewport", "isaacsim.core.nodes.IsaacCreateViewport"),
+                    ("getRenderProduct", "isaacsim.core.nodes.IsaacGetViewportRenderProduct"),
+                    ("setCamera", "isaacsim.core.nodes.IsaacSetCameraOnRenderProduct"),
+                    ("cameraHelperRgb", "isaacsim.ros2.bridge.ROS2CameraHelper"),
                 ],
-                og.Controller.Keys.CONNECT: [
-                    ("OnPlaybackTick.outputs:tick", "IsaacCreateRenderProductLeft.inputs:execIn"),
-                    ("OnPlaybackTick.outputs:tick", "IsaacCreateRenderProductRight.inputs:execIn"),
-                    ("IsaacCreateRenderProductLeft.outputs:execOut", "ROS2CameraHelperLeft.inputs:execIn"),
-                    ("IsaacCreateRenderProductRight.outputs:execOut", "ROS2CameraHelperRight.inputs:execIn"),
-                    ("IsaacCreateRenderProductLeft.outputs:renderProductPath", "ROS2CameraHelperLeft.inputs:renderProductPath"),
-                    ("IsaacCreateRenderProductRight.outputs:renderProductPath", "ROS2CameraHelperRight.inputs:renderProductPath"),
+                keys.CONNECT: [
+                    ("OnTick.outputs:tick", "createViewport.inputs:execIn"),
+                    ("createViewport.outputs:execOut", "getRenderProduct.inputs:execIn"),
+                    ("createViewport.outputs:viewport", "getRenderProduct.inputs:viewport"),
+                    ("getRenderProduct.outputs:execOut", "setCamera.inputs:execIn"),
+                    ("getRenderProduct.outputs:renderProductPath", "setCamera.inputs:renderProductPath"),
+                    ("setCamera.outputs:execOut", "cameraHelperRgb.inputs:execIn"),
+                    ("getRenderProduct.outputs:renderProductPath", "cameraHelperRgb.inputs:renderProductPath"),
                 ],
-                og.Controller.Keys.SET_VALUES: [
-                    # Left camera configuration
-                    ("IsaacCreateRenderProductLeft.inputs:cameraPrim", left_camera_path),
-                    ("ROS2CameraHelperLeft.inputs:frameId", "camera_left"),
-                    ("ROS2CameraHelperLeft.inputs:topicName", "stereo_camera/left"),
-                    ("ROS2CameraHelperLeft.inputs:type", "rgb"),
-
-                    # Right camera configuration
-                    ("IsaacCreateRenderProductRight.inputs:cameraPrim", right_camera_path),
-                    ("ROS2CameraHelperRight.inputs:frameId", "camera_right"),
-                    ("ROS2CameraHelperRight.inputs:topicName", "stereo_camera/right"),
-                    ("ROS2CameraHelperRight.inputs:type", "rgb"),
+                keys.SET_VALUES: [
+                    ("createViewport.inputs:viewportId", 0),
+                    ("cameraHelperRgb.inputs:frameId", "camera_left"),
+                    ("cameraHelperRgb.inputs:topicName", "stereo_camera/left"),
+                    ("cameraHelperRgb.inputs:type", "rgb"),
+                    ("setCamera.inputs:cameraPrim", [usdrt.Sdf.Path(left_camera_path)]),
                 ],
             },
         )
 
-        carb.log_info("  ✓ ROS 2 stereo camera graph created")
+        # Run the left camera graph once to generate ROS image publishers
+        og.Controller.evaluate_sync(left_graph)
+        carb.log_info("  ✓ Left camera graph created and evaluated")
+
+        # ========== RIGHT CAMERA GRAPH ==========
+        carb.log_info("  Creating right camera graph...")
+        (right_graph, _, _, _) = og.Controller.edit(
+            {
+                "graph_path": "/World/StereoCamera_Right_Graph",
+                "evaluator_name": "push",
+                "pipeline_stage": og.GraphPipelineStage.GRAPH_PIPELINE_STAGE_ONDEMAND,
+            },
+            {
+                keys.CREATE_NODES: [
+                    ("OnTick", "omni.graph.action.OnTick"),
+                    ("createViewport", "isaacsim.core.nodes.IsaacCreateViewport"),
+                    ("getRenderProduct", "isaacsim.core.nodes.IsaacGetViewportRenderProduct"),
+                    ("setCamera", "isaacsim.core.nodes.IsaacSetCameraOnRenderProduct"),
+                    ("cameraHelperRgb", "isaacsim.ros2.bridge.ROS2CameraHelper"),
+                ],
+                keys.CONNECT: [
+                    ("OnTick.outputs:tick", "createViewport.inputs:execIn"),
+                    ("createViewport.outputs:execOut", "getRenderProduct.inputs:execIn"),
+                    ("createViewport.outputs:viewport", "getRenderProduct.inputs:viewport"),
+                    ("getRenderProduct.outputs:execOut", "setCamera.inputs:execIn"),
+                    ("getRenderProduct.outputs:renderProductPath", "setCamera.inputs:renderProductPath"),
+                    ("setCamera.outputs:execOut", "cameraHelperRgb.inputs:execIn"),
+                    ("getRenderProduct.outputs:renderProductPath", "cameraHelperRgb.inputs:renderProductPath"),
+                ],
+                keys.SET_VALUES: [
+                    ("createViewport.inputs:viewportId", 1),
+                    ("cameraHelperRgb.inputs:frameId", "camera_right"),
+                    ("cameraHelperRgb.inputs:topicName", "stereo_camera/right"),
+                    ("cameraHelperRgb.inputs:type", "rgb"),
+                    ("setCamera.inputs:cameraPrim", [usdrt.Sdf.Path(right_camera_path)]),
+                ],
+            },
+        )
+
+        # Run the right camera graph once to generate ROS image publishers
+        og.Controller.evaluate_sync(right_graph)
+        carb.log_info("  ✓ Right camera graph created and evaluated")
+
+        carb.log_info("  ✓ ROS 2 stereo camera graphs created successfully")
         carb.log_info("  Topics configured:")
         carb.log_info("    - /stereo_camera/left/image_raw")
         carb.log_info("    - /stereo_camera/left/camera_info")
         carb.log_info("    - /stereo_camera/right/image_raw")
         carb.log_info("    - /stereo_camera/right/camera_info")
 
-        return graph
+        return (left_graph, right_graph)
 
     except Exception as e:
-        carb.log_error(f"Failed to create stereo camera graph: {e}")
+        carb.log_error(f"Failed to create stereo camera graphs: {e}")
+        import traceback
+        carb.log_error(traceback.format_exc())
         return None
 
 
@@ -349,8 +405,12 @@ def main():
 
     carb.log_info("  ✓ Stereo cameras configured")
 
-    # Create ROS 2 Bridge action graph for stereo cameras
-    stereo_graph = create_stereo_camera_graph(left_camera_prim_path, right_camera_prim_path)
+    # Create ROS 2 Bridge action graph for stereo cameras (only if ROS 2 is available)
+    if ROS2_AVAILABLE:
+        stereo_graph = create_stereo_camera_graph(left_camera_prim_path, right_camera_prim_path)
+    else:
+        carb.log_warn("Skipping ROS 2 action graph creation - ROS 2 Bridge not available")
+        carb.log_warn("Cameras will still function in Isaac Sim for testing")
 
     carb.log_info("=" * 80)
     carb.log_info("LUKEBOT vSLAM SETUP COMPLETE!")
@@ -365,21 +425,37 @@ def main():
     carb.log_info(f"  - Depth Range: 0.35m - 10m")
     carb.log_info(f"  - Frame Rate: {frequency} FPS")
     carb.log_info("")
-    carb.log_info("ROS 2 Topics Published:")
-    carb.log_info("  - /stereo_camera/left/image_raw (sensor_msgs/Image)")
-    carb.log_info("  - /stereo_camera/left/camera_info (sensor_msgs/CameraInfo)")
-    carb.log_info("  - /stereo_camera/right/image_raw (sensor_msgs/Image)")
-    carb.log_info("  - /stereo_camera/right/camera_info (sensor_msgs/CameraInfo)")
-    carb.log_info("")
-    carb.log_info("Next Steps to Run Isaac ROS vSLAM:")
-    carb.log_info("  1. Start Isaac Sim (this script)")
-    carb.log_info("  2. In separate terminal, launch Isaac ROS vSLAM:")
-    carb.log_info("     ros2 launch isaac_ros_visual_slam isaac_ros_visual_slam.launch.py")
-    carb.log_info("  3. Verify topics:")
-    carb.log_info("     ros2 topic list")
-    carb.log_info("     ros2 topic hz /stereo_camera/left/image_raw")
-    carb.log_info("  4. Visualize in RViz2:")
-    carb.log_info("     rviz2")
+    if ROS2_AVAILABLE:
+        carb.log_info("ROS 2 Topics Published:")
+        carb.log_info("  - /stereo_camera/left/image_raw (sensor_msgs/Image)")
+        carb.log_info("  - /stereo_camera/left/camera_info (sensor_msgs/CameraInfo)")
+        carb.log_info("  - /stereo_camera/right/image_raw (sensor_msgs/Image)")
+        carb.log_info("  - /stereo_camera/right/camera_info (sensor_msgs/CameraInfo)")
+        carb.log_info("")
+        carb.log_info("Next Steps to Run Isaac ROS vSLAM:")
+        carb.log_info("  1. This script is running (Isaac Sim with stereo cameras)")
+        carb.log_info("  2. In separate terminal, launch Isaac ROS vSLAM:")
+        carb.log_info("     ros2 launch isaac_ros_visual_slam isaac_ros_visual_slam.launch.py")
+        carb.log_info("  3. Verify topics:")
+        carb.log_info("     ros2 topic list")
+        carb.log_info("     ros2 topic hz /stereo_camera/left/image_raw")
+        carb.log_info("  4. Visualize in RViz2:")
+        carb.log_info("     rviz2")
+    else:
+        carb.log_info("ROS 2 Status: NOT AVAILABLE")
+        carb.log_info("  ⚠ ROS 2 Bridge failed to start (ROS 2 not installed on this system)")
+        carb.log_info("")
+        carb.log_info("To Enable ROS 2 Integration:")
+        carb.log_info("  Option 1 - Install ROS 2 on Windows:")
+        carb.log_info("    - Download ROS 2 Humble for Windows")
+        carb.log_info("    - Follow: https://docs.ros.org/en/humble/Installation/Windows-Install-Binary.html")
+        carb.log_info("")
+        carb.log_info("  Option 2 - Deploy to Jetson Orin Nano (Recommended):")
+        carb.log_info("    - Jetson comes with ROS 2 pre-installed")
+        carb.log_info("    - This setup is ready for Jetson deployment")
+        carb.log_info("    - ROS 2 topics will publish automatically on Jetson")
+        carb.log_info("")
+        carb.log_info("For now: Stereo cameras are functioning in Isaac Sim for testing")
     carb.log_info("")
     carb.log_info("Robot will move forward slowly to generate SLAM data")
     carb.log_info("=" * 80)
