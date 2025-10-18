@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Lukebot Keyboard Teleoperation Demo
-Control Lukebot with WASD keys for omnidirectional movement
+Lukebot Keyboard Teleoperation - FIXED VERSION
+Fixed mecanum wheel configuration to resolve axis swap issue
 
 Controls:
   W - Move forward
@@ -14,6 +14,11 @@ Controls:
   E - Rotate clockwise
   SPACE - Stop
   ESC - Exit
+
+FIXES APPLIED:
+1. Swap forward/lateral in controller command (axes swapped in URDF)
+2. Increase damping to reduce jitter (10.0 -> reduces wheel fighting)
+3. Negate rotation direction for correct turning
 """
 
 from isaacsim import SimulationApp
@@ -31,7 +36,6 @@ from isaacsim.core.utils.viewports import set_camera_view
 from isaacsim.robot.wheeled_robots.controllers.holonomic_controller import HolonomicController
 from isaacsim.robot.wheeled_robots.robots import WheeledRobot
 from isaacsim.robot.wheeled_robots.robots.holonomic_robot_usd_setup import HolonomicRobotUsdSetup
-from isaacsim.sensors.camera import Camera
 from pxr import Gf, Sdf, UsdGeom, UsdPhysics
 
 # Enable necessary extensions
@@ -123,7 +127,7 @@ def main():
     urdf_path = "C:/Users/Luke/Desktop/issac_sim/source/extensions/isaacsim.asset.importer.urdf/data/urdf/robots/lukebot/urdf/lukebot.urdf"
 
     carb.log_info("=" * 80)
-    carb.log_info("LUKEBOT KEYBOARD TELEOPERATION DEMO")
+    carb.log_info("LUKEBOT KEYBOARD TELEOPERATION - FIXED VERSION")
     carb.log_info("=" * 80)
     carb.log_info("Importing Lukebot URDF...")
 
@@ -171,10 +175,8 @@ def main():
 
     # Add mecanum wheel attributes to wheel joints
     wheel_radius = 0.050  # 50mm = 0.05m
-    # Mecanum angles NEGATED for Lukebot's positive Y-axis wheels (axis="0 1 0")
-    # Kaya uses axis="0 -1 0" so needs opposite angles
-    # FL=-45°, FR=+45°, RL=+45°, RR=-45°
-    mecanum_angles = [-np.pi / 4, np.pi / 4, np.pi / 4, -np.pi / 4]  # radians
+    # Standard mecanum configuration: FL=+45°, FR=-45°, RL=-45°, RR=+45°
+    mecanum_angles = [np.pi / 4, -np.pi / 4, -np.pi / 4, np.pi / 4]  # radians
 
     carb.log_info("Configuring mecanum wheels...")
     for joint_name, angle in zip(wheel_dof_names, mecanum_angles):
@@ -202,17 +204,13 @@ def main():
             else:
                 joint_prim.GetAttribute("isaacmecanumwheel:angle").Set(angle)
 
-            # Set drive properties with very low damping for stability
+            # INCREASED DAMPING to reduce jitter from wheel fighting
             drive_api = UsdPhysics.DriveAPI.Apply(joint_prim, "angular")
-            drive_api.GetDampingAttr().Set(1.0)  # Reduced from 10.0
+            drive_api.GetDampingAttr().Set(10.0)  # Increased from 1.0
             drive_api.GetStiffnessAttr().Set(0.0)
             carb.log_info(f"  ✓ Configured wheel: {joint_name}")
         else:
             carb.log_warn(f"  ✗ Joint not found: {joint_name}")
-
-    # Camera setup - skipped for URDF imports (link needs conversion to Camera prim)
-    carb.log_info("Camera setup will be added in future updates")
-    camera = None
 
     # Create test scene with target cube
     carb.log_info("Creating test scene with target cube...")
@@ -257,7 +255,18 @@ def main():
     UsdPhysics.CollisionAPI.Apply(wall_prim)
     UsdPhysics.RigidBodyAPI.Apply(wall_prim)
 
-    carb.log_info("  ✓ Created test scene with YELLOW target cube")
+    # Visual reference markers
+    forward_marker = stage.DefinePrim("/World/Markers/ForwardMarker", "Cube")
+    UsdGeom.Xform(forward_marker).AddTranslateOp().Set(Gf.Vec3f(1.0, 0.0, 0.05))
+    UsdGeom.Xform(forward_marker).AddScaleOp().Set(Gf.Vec3f(0.3, 0.1, 0.1))
+    forward_marker.GetAttribute("primvars:displayColor").Set([(1.0, 0.0, 0.0)])  # Red = Forward
+
+    left_marker = stage.DefinePrim("/World/Markers/LeftMarker", "Cube")
+    UsdGeom.Xform(left_marker).AddTranslateOp().Set(Gf.Vec3f(0.0, 1.0, 0.05))
+    UsdGeom.Xform(left_marker).AddScaleOp().Set(Gf.Vec3f(0.1, 0.3, 0.1))
+    left_marker.GetAttribute("primvars:displayColor").Set([(0.0, 1.0, 0.0)])  # Green = Left
+
+    carb.log_info("  ✓ Created test scene")
 
     # Add Lukebot as a WheeledRobot to the scene
     my_lukebot = my_world.scene.add(
@@ -286,15 +295,13 @@ def main():
     ) = lukebot_setup.get_holonomic_controller_params()
 
     # DEBUG: Print what the controller extracted
-    carb.log_warn("=" * 60)
-    carb.log_warn("CONTROLLER PARAMETERS FROM USD:")
-    carb.log_warn(f"Wheel radius: {wheel_radius_params}")
-    carb.log_warn(f"Wheel positions:\n{wheel_positions}")
-    carb.log_warn(f"Wheel orientations:\n{wheel_orientations}")
-    carb.log_warn(f"Mecanum angles: {mecanum_angles_params}")
-    carb.log_warn(f"Wheel axis: {wheel_axis}")
-    carb.log_warn(f"Up axis: {up_axis}")
-    carb.log_warn("=" * 60)
+    carb.log_info("=" * 60)
+    carb.log_info("CONTROLLER PARAMETERS:")
+    carb.log_info(f"Wheel radius: {wheel_radius_params}")
+    carb.log_info(f"Mecanum angles: {[np.degrees(a) for a in mecanum_angles_params]}°")
+    carb.log_info(f"Wheel axis: {wheel_axis}")
+    carb.log_info(f"Up axis: {up_axis}")
+    carb.log_info("=" * 60)
 
     my_controller = HolonomicController(
         name="holonomic_controller",
@@ -319,10 +326,15 @@ def main():
     carb.log_info("=" * 80)
     carb.log_info(f"Robot location: {robot_prim_path}")
     carb.log_info("")
+    carb.log_info("FIXES APPLIED:")
+    carb.log_info("  ✓ Axis swap compensation (lateral ↔ forward)")
+    carb.log_info("  ✓ Increased damping to reduce jitter (10.0)")
+    carb.log_info("  ✓ Rotation direction correction")
+    carb.log_info("")
     carb.log_info("KEYBOARD CONTROLS:")
-    carb.log_info("  W - Move forward")
+    carb.log_info("  W - Move forward (toward RED marker)")
     carb.log_info("  S - Move backward")
-    carb.log_info("  A - Strafe left")
+    carb.log_info("  A - Strafe left (toward GREEN marker)")
     carb.log_info("  D - Strafe right")
     carb.log_info("  Q - Rotate counter-clockwise")
     carb.log_info("  E - Rotate clockwise")
@@ -330,12 +342,12 @@ def main():
     carb.log_info("")
     carb.log_info("OBJECTIVE:")
     carb.log_info("  Navigate to the YELLOW cube using keyboard controls")
-    carb.log_info("  Practice omnidirectional movement and obstacle avoidance")
     carb.log_info("=" * 80)
 
     step_count = 0
     reset_needed = False
     last_command = [0.0, 0.0, 0.0]
+    last_position = None
 
     try:
         while simulation_app.is_running():
@@ -350,21 +362,38 @@ def main():
                     my_controller.reset()
                     reset_needed = False
                     step_count = 0
+                    last_position = None
 
                 # Get keyboard command and apply to robot
                 command = keyboard_ctrl.get_command()
 
-                # Apply command directly - no axis swapping needed with corrected mecanum angles
-                # Command format: [forward, lateral, rotation]
+                # FIX: Swap lateral and forward to compensate for URDF axis orientation
+                # Original command: [forward, lateral, rotation]
+                # Fixed command: [lateral, forward, -rotation]
+                command_fixed = [command[1], command[0], -command[2]]
 
                 # Only apply command if robot exists and is valid
                 if my_lukebot:
-                    wheel_actions = my_controller.forward(command=command)
+                    wheel_actions = my_controller.forward(command=command_fixed)
                     my_lukebot.apply_wheel_actions(wheel_actions)
+
+                    # Periodic diagnostics
+                    if step_count % 60 == 0 and any(c != 0 for c in command):
+                        current_position, _ = my_lukebot.get_world_pose()
+                        if last_position is not None:
+                            delta_pos = current_position - last_position
+                            delta_magnitude = np.linalg.norm(delta_pos[:2])
+                            if delta_magnitude > 0.001:
+                                direction = np.arctan2(delta_pos[1], delta_pos[0])
+                                direction_deg = np.degrees(direction)
+
+                                carb.log_info(f"[{step_count}] Pos: ({current_position[0]:+.2f}, {current_position[1]:+.2f}) | "
+                                            f"Move: {direction_deg:+.0f}° | Cmd: F={command[0]:.1f} L={command[1]:.1f} R={command[2]:.1f}")
+                        last_position = current_position.copy()
 
                 # Log command changes
                 if command != last_command and any(c != 0 for c in command):
-                    carb.log_info(f"Command: Forward={command[0]:.2f}, Lateral={command[1]:.2f}, Rotation={command[2]:.2f}")
+                    carb.log_info(f">> Command: Forward={command[0]:.2f}, Lateral={command[1]:.2f}, Rotation={command[2]:.2f}")
                     last_command = command.copy()
 
                 step_count += 1

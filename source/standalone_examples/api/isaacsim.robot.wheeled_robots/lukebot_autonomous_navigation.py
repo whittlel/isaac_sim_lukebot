@@ -9,6 +9,7 @@ Features:
 - Autonomous object detection and navigation to yellow target
 - ROS 2 Bridge for vSLAM integration
 - State machine for search behavior
+- Uses new motion controller with physics bypass for reliable movement
 """
 
 from isaacsim import SimulationApp
@@ -19,16 +20,17 @@ import carb
 import numpy as np
 import omni.kit.commands
 from isaacsim.core.api import World
+from isaacsim.core.api.robots import Robot
 from isaacsim.core.utils.extensions import enable_extension
 from isaacsim.core.utils.stage import get_current_stage
 from isaacsim.core.utils.viewports import set_camera_view
-from isaacsim.robot.wheeled_robots.controllers.holonomic_controller import HolonomicController
-from isaacsim.robot.wheeled_robots.robots import WheeledRobot
-from isaacsim.robot.wheeled_robots.robots.holonomic_robot_usd_setup import HolonomicRobotUsdSetup
 from isaacsim.sensors.camera import Camera
-from pxr import Gf, Sdf, UsdGeom, UsdPhysics
+from pxr import Gf, UsdGeom, UsdPhysics
 import omni.graph.core as og
 import usdrt.Sdf
+
+# Import our motion controller
+from lukebot_motion_controller import create_motion_controller
 
 # Enable necessary extensions
 enable_extension("omni.isaac.sensor")
@@ -215,8 +217,8 @@ def create_detailed_environment(stage):
 class AutonomousNavigationBehavior:
     """State machine for autonomous object finding"""
 
-    def __init__(self, controller):
-        self.controller = controller
+    def __init__(self, motion_controller):
+        self.motion_controller = motion_controller
         self.state = "SEARCHING"  # States: SEARCHING, APPROACHING, REACHED, CELEBRATING
         self.search_pattern_index = 0
         self.frames_in_state = 0
@@ -259,19 +261,19 @@ class AutonomousNavigationBehavior:
             carb.log_info(f"TARGET FOUND! ({self.target_pixel_count} pixels) - Switching to APPROACHING")
             self.state = "APPROACHING"
             self.frames_in_state = 0
-            return self.controller.forward(command=[0.0, 0.0, 0.0])  # Stop momentarily
+            return (0.0, 0.0, 0.0)  # Stop momentarily
 
         # Search pattern: rotate in place with occasional forward movement
         if self.frames_in_state < 60:
             # Rotate slowly
-            return self.controller.forward(command=[0.0, 0.0, 0.3])
+            return (0.0, 0.0, 0.3)
         elif self.frames_in_state < 80:
             # Move forward a bit
-            return self.controller.forward(command=[0.2, 0.0, 0.0])
+            return (0.2, 0.0, 0.0)
         else:
             # Reset pattern
             self.frames_in_state = 0
-            return self.controller.forward(command=[0.0, 0.0, 0.3])
+            return (0.0, 0.0, 0.3)
 
     def _approach_behavior(self):
         """Navigate toward the yellow target"""
@@ -279,14 +281,14 @@ class AutonomousNavigationBehavior:
             carb.log_warn("Target lost! Returning to SEARCHING")
             self.state = "SEARCHING"
             self.frames_in_state = 0
-            return self.controller.forward(command=[0.0, 0.0, 0.0])
+            return (0.0, 0.0, 0.0)
 
         # Check if we've reached the target (large pixel count)
         if self.target_pixel_count > 150000:  # Target fills most of view
             carb.log_info("TARGET REACHED!")
             self.state = "REACHED"
             self.frames_in_state = 0
-            return self.controller.forward(command=[0.0, 0.0, 0.0])
+            return (0.0, 0.0, 0.0)
 
         # Navigate: adjust heading based on target position, move forward
         turn_speed = -self.last_seen_direction * 0.4  # Proportional control
@@ -296,27 +298,27 @@ class AutonomousNavigationBehavior:
         if self.target_pixel_count > 50000:
             forward_speed = 0.15
 
-        return self.controller.forward(command=[forward_speed, 0.0, turn_speed])
+        return (forward_speed, 0.0, turn_speed)
 
     def _reached_behavior(self):
         """Stop at the target"""
         if self.frames_in_state < 60:
-            return self.controller.forward(command=[0.0, 0.0, 0.0])
+            return (0.0, 0.0, 0.0)
         else:
             carb.log_info("Mission complete! Starting celebration...")
             self.state = "CELEBRATING"
             self.frames_in_state = 0
-            return self.controller.forward(command=[0.0, 0.0, 0.0])
+            return (0.0, 0.0, 0.0)
 
     def _celebrate_behavior(self):
         """Victory spin!"""
         if self.frames_in_state < 180:
-            return self.controller.forward(command=[0.0, 0.0, 0.5])
+            return (0.0, 0.0, 0.5)
         else:
             # Reset to searching
             self.state = "SEARCHING"
             self.frames_in_state = 0
-            return self.controller.forward(command=[0.0, 0.0, 0.0])
+            return (0.0, 0.0, 0.0)
 
 
 def main():
@@ -371,7 +373,7 @@ def main():
         simulation_app.close()
         return
 
-    # Configure wheels
+    # Configure wheel drive properties for visual wheel spinning
     wheel_dof_names = [
         "front_left_wheel_joint",
         "front_right_wheel_joint",
@@ -379,31 +381,18 @@ def main():
         "rear_right_wheel_joint",
     ]
 
-    wheel_radius = 0.050
-    mecanum_angles = [np.pi / 4, -np.pi / 4, -np.pi / 4, np.pi / 4]
-
-    for joint_name, angle in zip(wheel_dof_names, mecanum_angles):
-        possible_paths = [f"{robot_prim_path}/{joint_name}", f"{robot_prim_path}/joints/{joint_name}"]
-        joint_prim = None
-        for joint_path in possible_paths:
-            joint_prim = stage.GetPrimAtPath(joint_path)
-            if joint_prim.IsValid():
-                break
+    carb.log_info("Configuring wheel drive properties...")
+    for joint_name in wheel_dof_names:
+        joint_path = f"{robot_prim_path}/joints/{joint_name}"
+        joint_prim = stage.GetPrimAtPath(joint_path)
 
         if joint_prim and joint_prim.IsValid():
-            if not joint_prim.HasAttribute("isaacmecanumwheel:radius"):
-                joint_prim.CreateAttribute("isaacmecanumwheel:radius", Sdf.ValueTypeNames.Float).Set(wheel_radius)
-            else:
-                joint_prim.GetAttribute("isaacmecanumwheel:radius").Set(wheel_radius)
-
-            if not joint_prim.HasAttribute("isaacmecanumwheel:angle"):
-                joint_prim.CreateAttribute("isaacmecanumwheel:angle", Sdf.ValueTypeNames.Float).Set(angle)
-            else:
-                joint_prim.GetAttribute("isaacmecanumwheel:angle").Set(angle)
-
             drive_api = UsdPhysics.DriveAPI.Apply(joint_prim, "angular")
             drive_api.GetDampingAttr().Set(100.0)
             drive_api.GetStiffnessAttr().Set(0.0)
+            carb.log_info(f"  ✓ Configured {joint_name}")
+        else:
+            carb.log_warn(f"  ✗ Joint not found: {joint_name}")
 
     # Create stereo cameras
     camera_center_position = np.array([0.235, 0.0, 0.09])
@@ -442,43 +431,28 @@ def main():
     # Create detailed test environment
     create_detailed_environment(stage)
 
-    # Add Lukebot as WheeledRobot
+    # Add Lukebot as a Robot (NOT WheeledRobot)
     my_lukebot = my_world.scene.add(
-        WheeledRobot(
+        Robot(
             prim_path=robot_prim_path,
             name="my_lukebot",
-            wheel_dof_names=wheel_dof_names,
-            create_robot=False,
             position=np.array([0, 0.0, 0.1]),
         )
     )
 
-    # Setup controller
-    lukebot_setup = HolonomicRobotUsdSetup(
-        robot_prim_path=robot_prim_path, com_prim_path=f"{robot_prim_path}/chassis_link"
+    # Create motion controller with actual Lukebot dimensions
+    carb.log_info("Creating motion controller...")
+    motion_controller = create_motion_controller(
+        robot=my_lukebot,
+        use_simulation=True,
+        wheel_base=0.30,      # 300mm between front/rear axles
+        track_width=0.34,     # 340mm between left/right wheels
+        wheel_radius=0.05     # 50mm wheel radius
     )
-
-    (
-        wheel_radius_params,
-        wheel_positions,
-        wheel_orientations,
-        mecanum_angles_params,
-        wheel_axis,
-        up_axis,
-    ) = lukebot_setup.get_holonomic_controller_params()
-
-    my_controller = HolonomicController(
-        name="holonomic_controller",
-        wheel_radius=wheel_radius_params,
-        wheel_positions=wheel_positions,
-        wheel_orientations=wheel_orientations,
-        mecanum_angles=mecanum_angles_params,
-        wheel_axis=wheel_axis,
-        up_axis=up_axis,
-    )
+    carb.log_info("  ✓ Motion controller initialized with physics bypass")
 
     # Initialize autonomous behavior
-    nav_behavior = AutonomousNavigationBehavior(my_controller)
+    nav_behavior = AutonomousNavigationBehavior(motion_controller)
 
     # Reset world
     my_world.reset()
@@ -519,8 +493,8 @@ def main():
         if my_world.is_playing():
             if reset_needed:
                 my_world.reset()
-                my_controller.reset()
-                nav_behavior = AutonomousNavigationBehavior(my_controller)
+                motion_controller.reset()
+                nav_behavior = AutonomousNavigationBehavior(motion_controller)
                 reset_needed = False
                 i = 0
 
@@ -528,8 +502,9 @@ def main():
             left_rgb = left_camera.get_rgb()
 
             # Update autonomous behavior
-            wheel_action = nav_behavior.update(left_rgb, my_lukebot)
-            my_lukebot.apply_wheel_actions(wheel_action)
+            vx, vy, omega = nav_behavior.update(left_rgb, my_lukebot)
+            motion_controller.set_velocity(vx, vy, omega)
+            motion_controller.update(dt=1.0/60.0)  # 60 FPS
 
             # Log status periodically
             if i % 120 == 0 and i > 0:

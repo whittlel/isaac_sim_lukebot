@@ -4,6 +4,7 @@
 """
 Lukebot with OAK-D IOT 75 Stereo Camera + ROS 2 Bridge for Isaac ROS vSLAM
 Demonstrates complete stereo camera setup with ROS 2 topic publishing
+Uses new motion controller with physics bypass for reliable movement
 """
 
 from isaacsim import SimulationApp
@@ -14,31 +15,39 @@ import carb
 import numpy as np
 import omni.kit.commands
 from isaacsim.core.api import World
+from isaacsim.core.api.robots import Robot
 from isaacsim.core.utils.extensions import enable_extension
 from isaacsim.core.utils.stage import get_current_stage
 from isaacsim.core.utils.viewports import set_camera_view
-from isaacsim.robot.wheeled_robots.controllers.holonomic_controller import HolonomicController
-from isaacsim.robot.wheeled_robots.robots import WheeledRobot
-from isaacsim.robot.wheeled_robots.robots.holonomic_robot_usd_setup import HolonomicRobotUsdSetup
 from isaacsim.sensors.camera import Camera
-from pxr import Gf, Sdf, UsdGeom, UsdPhysics
+from pxr import Gf, UsdGeom, UsdPhysics
 import omni.graph.core as og
 import usdrt.Sdf
+
+# Import our motion controller
+from lukebot_motion_controller import create_motion_controller
 
 # Enable necessary extensions
 enable_extension("omni.isaac.sensor")
 
-# Try to enable ROS 2 Bridge - requires ROS 2 installed on system
+# Try to enable ROS 2 Bridge - requires ROS 2 environment variables
 ROS2_AVAILABLE = False
 try:
     enable_extension("isaacsim.ros2.bridge")
     simulation_app.update()
-    ROS2_AVAILABLE = True
-    carb.log_info("ROS 2 Bridge extension enabled successfully")
+
+    # Check if extension actually loaded by verifying the manager exists
+    import omni.kit.app
+    extension_manager = omni.kit.app.get_app().get_extension_manager()
+    if extension_manager.is_extension_enabled("isaacsim.ros2.bridge"):
+        ROS2_AVAILABLE = True
+        carb.log_info("ROS 2 Bridge extension enabled successfully")
+    else:
+        carb.log_warn("ROS 2 Bridge extension failed to start")
+        carb.log_warn("Stereo cameras will be created, but ROS 2 topic publishing will be skipped")
 except Exception as e:
     carb.log_warn(f"ROS 2 Bridge not available: {e}")
     carb.log_warn("Stereo cameras will be created, but ROS 2 topic publishing will be skipped")
-    carb.log_warn("To enable ROS 2: Install ROS 2 Humble on your system")
 
 
 def create_stereo_camera_graph(left_camera_path, right_camera_path):
@@ -204,7 +213,7 @@ def main():
         simulation_app.close()
         return
 
-    # Wheel joint names
+    # Configure wheel drive properties for visual wheel spinning
     wheel_dof_names = [
         "front_left_wheel_joint",
         "front_right_wheel_joint",
@@ -212,41 +221,16 @@ def main():
         "rear_right_wheel_joint",
     ]
 
-    # Add mecanum wheel attributes to wheel joints
-    wheel_radius = 0.050  # 50mm = 0.05m
-    mecanum_angles = [np.pi / 4, -np.pi / 4, -np.pi / 4, np.pi / 4]  # radians
-
-    carb.log_info("Configuring mecanum wheels...")
-    for joint_name, angle in zip(wheel_dof_names, mecanum_angles):
-        # Try different possible paths
-        possible_paths = [
-            f"{robot_prim_path}/{joint_name}",
-            f"{robot_prim_path}/joints/{joint_name}",
-        ]
-
-        joint_prim = None
-        for joint_path in possible_paths:
-            joint_prim = stage.GetPrimAtPath(joint_path)
-            if joint_prim.IsValid():
-                break
+    carb.log_info("Configuring wheel drive properties...")
+    for joint_name in wheel_dof_names:
+        joint_path = f"{robot_prim_path}/joints/{joint_name}"
+        joint_prim = stage.GetPrimAtPath(joint_path)
 
         if joint_prim and joint_prim.IsValid():
-            # Add custom mecanum wheel attributes
-            if not joint_prim.HasAttribute("isaacmecanumwheel:radius"):
-                joint_prim.CreateAttribute("isaacmecanumwheel:radius", Sdf.ValueTypeNames.Float).Set(wheel_radius)
-            else:
-                joint_prim.GetAttribute("isaacmecanumwheel:radius").Set(wheel_radius)
-
-            if not joint_prim.HasAttribute("isaacmecanumwheel:angle"):
-                joint_prim.CreateAttribute("isaacmecanumwheel:angle", Sdf.ValueTypeNames.Float).Set(angle)
-            else:
-                joint_prim.GetAttribute("isaacmecanumwheel:angle").Set(angle)
-
-            # Set drive properties
             drive_api = UsdPhysics.DriveAPI.Apply(joint_prim, "angular")
             drive_api.GetDampingAttr().Set(100.0)
             drive_api.GetStiffnessAttr().Set(0.0)
-            carb.log_info(f"  ✓ Configured wheel: {joint_name}")
+            carb.log_info(f"  ✓ Configured {joint_name}")
         else:
             carb.log_warn(f"  ✗ Joint not found: {joint_name}")
 
@@ -345,43 +329,25 @@ def main():
 
     carb.log_info("  ✓ Created test scene")
 
-    # Add Lukebot as a WheeledRobot
+    # Add Lukebot as a Robot (NOT WheeledRobot)
     my_lukebot = my_world.scene.add(
-        WheeledRobot(
+        Robot(
             prim_path=robot_prim_path,
             name="my_lukebot",
-            wheel_dof_names=wheel_dof_names,
-            create_robot=False,  # Already imported from URDF
             position=np.array([0, 0.0, 0.1]),
         )
     )
 
-    # Setup HolonomicController
-    carb.log_info("Setting up HolonomicController...")
-    lukebot_setup = HolonomicRobotUsdSetup(
-        robot_prim_path=robot_prim_path, com_prim_path=f"{robot_prim_path}/chassis_link"
+    # Create motion controller with actual Lukebot dimensions
+    carb.log_info("Creating motion controller...")
+    motion_controller = create_motion_controller(
+        robot=my_lukebot,
+        use_simulation=True,
+        wheel_base=0.30,      # 300mm between front/rear axles
+        track_width=0.34,     # 340mm between left/right wheels
+        wheel_radius=0.05     # 50mm wheel radius
     )
-
-    (
-        wheel_radius_params,
-        wheel_positions,
-        wheel_orientations,
-        mecanum_angles_params,
-        wheel_axis,
-        up_axis,
-    ) = lukebot_setup.get_holonomic_controller_params()
-
-    my_controller = HolonomicController(
-        name="holonomic_controller",
-        wheel_radius=wheel_radius_params,
-        wheel_positions=wheel_positions,
-        wheel_orientations=wheel_orientations,
-        mecanum_angles=mecanum_angles_params,
-        wheel_axis=wheel_axis,
-        up_axis=up_axis,
-    )
-
-    carb.log_info("  ✓ HolonomicController initialized")
+    carb.log_info("  ✓ Motion controller initialized with physics bypass")
 
     # Reset world
     my_world.reset()
@@ -472,7 +438,7 @@ def main():
         if my_world.is_playing():
             if reset_needed:
                 my_world.reset()
-                my_controller.reset()
+                motion_controller.reset()
                 reset_needed = False
                 i = 0
 
@@ -480,19 +446,22 @@ def main():
             # Vary movement slightly for interesting odometry
             if i < 500:
                 # Forward
-                my_lukebot.apply_wheel_actions(my_controller.forward(command=[0.15, 0.0, 0.0]))
+                motion_controller.set_velocity(vx=0.15, vy=0.0, omega=0.0)
             elif i < 700:
                 # Turn slightly right while moving
-                my_lukebot.apply_wheel_actions(my_controller.forward(command=[0.15, 0.0, -0.1]))
+                motion_controller.set_velocity(vx=0.15, vy=0.0, omega=-0.1)
             elif i < 900:
                 # Forward
-                my_lukebot.apply_wheel_actions(my_controller.forward(command=[0.15, 0.0, 0.0]))
+                motion_controller.set_velocity(vx=0.15, vy=0.0, omega=0.0)
             elif i < 1100:
                 # Turn slightly left while moving
-                my_lukebot.apply_wheel_actions(my_controller.forward(command=[0.15, 0.0, 0.1]))
+                motion_controller.set_velocity(vx=0.15, vy=0.0, omega=0.1)
             else:
                 # Continue forward
-                my_lukebot.apply_wheel_actions(my_controller.forward(command=[0.15, 0.0, 0.0]))
+                motion_controller.set_velocity(vx=0.15, vy=0.0, omega=0.0)
+
+            # Update robot pose
+            motion_controller.update(dt=1.0/60.0)  # 60 FPS
 
             # Log camera data periodically
             if i % 120 == 0 and i > 0:

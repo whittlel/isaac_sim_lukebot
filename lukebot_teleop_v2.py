@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Lukebot Keyboard Teleoperation Demo
-Control Lukebot with WASD keys for omnidirectional movement
+Lukebot Keyboard Teleoperation V2
+Uses the new motion controller abstraction for sim-to-real transfer
 
 Controls:
   W - Move forward
@@ -25,14 +25,14 @@ import numpy as np
 import omni.appwindow
 import omni.kit.commands
 from isaacsim.core.api import World
+from isaacsim.core.api.robots import Robot
 from isaacsim.core.utils.extensions import enable_extension
 from isaacsim.core.utils.stage import get_current_stage
 from isaacsim.core.utils.viewports import set_camera_view
-from isaacsim.robot.wheeled_robots.controllers.holonomic_controller import HolonomicController
-from isaacsim.robot.wheeled_robots.robots import WheeledRobot
-from isaacsim.robot.wheeled_robots.robots.holonomic_robot_usd_setup import HolonomicRobotUsdSetup
-from isaacsim.sensors.camera import Camera
-from pxr import Gf, Sdf, UsdGeom, UsdPhysics
+from pxr import Gf, UsdGeom, UsdPhysics
+
+# Import our motion controller
+from lukebot_motion_controller import create_motion_controller
 
 # Enable necessary extensions
 enable_extension("omni.isaac.sensor")
@@ -63,7 +63,6 @@ class KeyboardController:
 
     def _on_keyboard_event(self, event, *args, **kwargs):
         """Handle keyboard events"""
-        # Only process key press and release events
         if event.type == carb.input.KeyboardEventType.KEY_PRESS or event.type == carb.input.KeyboardEventType.KEY_REPEAT:
             # Forward/Backward (W/S)
             if event.input == carb.input.KeyboardInput.W:
@@ -102,12 +101,12 @@ class KeyboardController:
 
     def get_command(self):
         """Get current movement command [forward, lateral, rotation]"""
-        return [self.forward_speed, self.lateral_speed, self.rotation_speed]
+        return (self.forward_speed, self.lateral_speed, self.rotation_speed)
 
     def shutdown(self):
         """Clean up keyboard subscription"""
         if self._sub_keyboard:
-            self._input.unsubscribe_from_keyboard_events(self._keyboard, self._sub_keyboard)
+            self._input.unsubscribe_to_keyboard_events(self._keyboard, self._sub_keyboard)
             self._sub_keyboard = None
 
 
@@ -123,7 +122,8 @@ def main():
     urdf_path = "C:/Users/Luke/Desktop/issac_sim/source/extensions/isaacsim.asset.importer.urdf/data/urdf/robots/lukebot/urdf/lukebot.urdf"
 
     carb.log_info("=" * 80)
-    carb.log_info("LUKEBOT KEYBOARD TELEOPERATION DEMO")
+    carb.log_info("LUKEBOT KEYBOARD TELEOPERATION V2")
+    carb.log_info("Using Manual Mecanum Kinematics (Sim-to-Real Ready)")
     carb.log_info("=" * 80)
     carb.log_info("Importing Lukebot URDF...")
 
@@ -161,7 +161,7 @@ def main():
         simulation_app.close()
         return
 
-    # Wheel joint names
+    # Configure wheel drive properties
     wheel_dof_names = [
         "front_left_wheel_joint",
         "front_right_wheel_joint",
@@ -169,59 +169,27 @@ def main():
         "rear_right_wheel_joint",
     ]
 
-    # Add mecanum wheel attributes to wheel joints
-    wheel_radius = 0.050  # 50mm = 0.05m
-    # Mecanum angles NEGATED for Lukebot's positive Y-axis wheels (axis="0 1 0")
-    # Kaya uses axis="0 -1 0" so needs opposite angles
-    # FL=-45°, FR=+45°, RL=+45°, RR=-45°
-    mecanum_angles = [-np.pi / 4, np.pi / 4, np.pi / 4, -np.pi / 4]  # radians
-
-    carb.log_info("Configuring mecanum wheels...")
-    for joint_name, angle in zip(wheel_dof_names, mecanum_angles):
-        # Try different possible paths where the joint might be
-        possible_paths = [
-            f"{robot_prim_path}/{joint_name}",
-            f"{robot_prim_path}/joints/{joint_name}",
-        ]
-
-        joint_prim = None
-        for joint_path in possible_paths:
-            joint_prim = stage.GetPrimAtPath(joint_path)
-            if joint_prim.IsValid():
-                break
+    carb.log_info("Configuring wheel drive properties...")
+    for joint_name in wheel_dof_names:
+        joint_path = f"{robot_prim_path}/joints/{joint_name}"
+        joint_prim = stage.GetPrimAtPath(joint_path)
 
         if joint_prim and joint_prim.IsValid():
-            # Add custom mecanum wheel attributes
-            if not joint_prim.HasAttribute("isaacmecanumwheel:radius"):
-                joint_prim.CreateAttribute("isaacmecanumwheel:radius", Sdf.ValueTypeNames.Float).Set(wheel_radius)
-            else:
-                joint_prim.GetAttribute("isaacmecanumwheel:radius").Set(wheel_radius)
-
-            if not joint_prim.HasAttribute("isaacmecanumwheel:angle"):
-                joint_prim.CreateAttribute("isaacmecanumwheel:angle", Sdf.ValueTypeNames.Float).Set(angle)
-            else:
-                joint_prim.GetAttribute("isaacmecanumwheel:angle").Set(angle)
-
-            # Set drive properties with very low damping for stability
             drive_api = UsdPhysics.DriveAPI.Apply(joint_prim, "angular")
-            drive_api.GetDampingAttr().Set(1.0)  # Reduced from 10.0
+            drive_api.GetDampingAttr().Set(100.0)
             drive_api.GetStiffnessAttr().Set(0.0)
-            carb.log_info(f"  ✓ Configured wheel: {joint_name}")
+            carb.log_info(f"  ✓ Configured {joint_name}")
         else:
             carb.log_warn(f"  ✗ Joint not found: {joint_name}")
 
-    # Camera setup - skipped for URDF imports (link needs conversion to Camera prim)
-    carb.log_info("Camera setup will be added in future updates")
-    camera = None
-
     # Create test scene with target cube
-    carb.log_info("Creating test scene with target cube...")
+    carb.log_info("Creating test scene...")
 
-    # Target cube (Yellow - this is what the robot should find)
+    # Target cube (Yellow)
     target_cube = stage.DefinePrim("/World/Obstacles/TargetCube", "Cube")
     UsdGeom.Xform(target_cube).AddTranslateOp().Set(Gf.Vec3f(2.0, 1.5, 0.25))
     UsdGeom.Xform(target_cube).AddScaleOp().Set(Gf.Vec3f(0.5, 0.5, 0.5))
-    target_cube.GetAttribute("primvars:displayColor").Set([(1.0, 1.0, 0.0)])  # Yellow
+    target_cube.GetAttribute("primvars:displayColor").Set([(1.0, 1.0, 0.0)])
     UsdPhysics.CollisionAPI.Apply(target_cube)
     UsdPhysics.RigidBodyAPI.Apply(target_cube)
 
@@ -233,14 +201,6 @@ def main():
     UsdPhysics.CollisionAPI.Apply(box1_prim)
     UsdPhysics.RigidBodyAPI.Apply(box1_prim)
 
-    # Box obstacle 2 (Green)
-    box2_prim = stage.DefinePrim("/World/Obstacles/Box2", "Cube")
-    UsdGeom.Xform(box2_prim).AddTranslateOp().Set(Gf.Vec3f(-1.2, -1.2, 0.2))
-    UsdGeom.Xform(box2_prim).AddScaleOp().Set(Gf.Vec3f(0.3, 0.3, 0.4))
-    box2_prim.GetAttribute("primvars:displayColor").Set([(0.3, 0.9, 0.3)])
-    UsdPhysics.CollisionAPI.Apply(box2_prim)
-    UsdPhysics.RigidBodyAPI.Apply(box2_prim)
-
     # Cylinder obstacle (Blue)
     cylinder_prim = stage.DefinePrim("/World/Obstacles/Cylinder1", "Cylinder")
     UsdGeom.Xform(cylinder_prim).AddTranslateOp().Set(Gf.Vec3f(-1.8, 1.0, 0.3))
@@ -249,64 +209,27 @@ def main():
     UsdPhysics.CollisionAPI.Apply(cylinder_prim)
     UsdPhysics.RigidBodyAPI.Apply(cylinder_prim)
 
-    # Wall (Gray)
-    wall_prim = stage.DefinePrim("/World/Obstacles/Wall1", "Cube")
-    UsdGeom.Xform(wall_prim).AddTranslateOp().Set(Gf.Vec3f(0.0, 2.5, 0.4))
-    UsdGeom.Xform(wall_prim).AddScaleOp().Set(Gf.Vec3f(3.0, 0.1, 0.8))
-    wall_prim.GetAttribute("primvars:displayColor").Set([(0.6, 0.6, 0.6)])
-    UsdPhysics.CollisionAPI.Apply(wall_prim)
-    UsdPhysics.RigidBodyAPI.Apply(wall_prim)
+    carb.log_info("  ✓ Created test scene")
 
-    carb.log_info("  ✓ Created test scene with YELLOW target cube")
-
-    # Add Lukebot as a WheeledRobot to the scene
+    # Add Lukebot as a Robot (NOT WheeledRobot)
     my_lukebot = my_world.scene.add(
-        WheeledRobot(
+        Robot(
             prim_path=robot_prim_path,
             name="my_lukebot",
-            wheel_dof_names=wheel_dof_names,
-            create_robot=False,  # Already imported from URDF
             position=np.array([0, 0.0, 0.1]),
         )
     )
 
-    # Setup HolonomicController
-    carb.log_info("Setting up HolonomicController...")
-    lukebot_setup = HolonomicRobotUsdSetup(
-        robot_prim_path=robot_prim_path, com_prim_path=f"{robot_prim_path}/chassis_link"
+    # Create motion controller with actual Lukebot dimensions
+    carb.log_info("Creating motion controller...")
+    motion_controller = create_motion_controller(
+        robot=my_lukebot,
+        use_simulation=True,
+        wheel_base=0.30,      # 300mm between front/rear axles
+        track_width=0.34,     # 340mm between left/right wheels
+        wheel_radius=0.05     # 50mm wheel radius
     )
-
-    (
-        wheel_radius_params,
-        wheel_positions,
-        wheel_orientations,
-        mecanum_angles_params,
-        wheel_axis,
-        up_axis,
-    ) = lukebot_setup.get_holonomic_controller_params()
-
-    # DEBUG: Print what the controller extracted
-    carb.log_warn("=" * 60)
-    carb.log_warn("CONTROLLER PARAMETERS FROM USD:")
-    carb.log_warn(f"Wheel radius: {wheel_radius_params}")
-    carb.log_warn(f"Wheel positions:\n{wheel_positions}")
-    carb.log_warn(f"Wheel orientations:\n{wheel_orientations}")
-    carb.log_warn(f"Mecanum angles: {mecanum_angles_params}")
-    carb.log_warn(f"Wheel axis: {wheel_axis}")
-    carb.log_warn(f"Up axis: {up_axis}")
-    carb.log_warn("=" * 60)
-
-    my_controller = HolonomicController(
-        name="holonomic_controller",
-        wheel_radius=wheel_radius_params,
-        wheel_positions=wheel_positions,
-        wheel_orientations=wheel_orientations,
-        mecanum_angles=mecanum_angles_params,
-        wheel_axis=wheel_axis,
-        up_axis=up_axis,
-    )
-
-    carb.log_info("  ✓ HolonomicController initialized")
+    carb.log_info("  ✓ Motion controller initialized with manual mecanum kinematics")
 
     # Initialize keyboard controller
     keyboard_ctrl = KeyboardController()
@@ -314,8 +237,8 @@ def main():
     # Reset world
     my_world.reset()
 
-    carb.log_info("=" * 80)
-    carb.log_info("LUKEBOT TELEOPERATION READY!")
+    carb.log_info("\n" + "=" * 80)
+    carb.log_info("LUKEBOT TELEOPERATION V2 READY!")
     carb.log_info("=" * 80)
     carb.log_info(f"Robot location: {robot_prim_path}")
     carb.log_info("")
@@ -330,12 +253,12 @@ def main():
     carb.log_info("")
     carb.log_info("OBJECTIVE:")
     carb.log_info("  Navigate to the YELLOW cube using keyboard controls")
-    carb.log_info("  Practice omnidirectional movement and obstacle avoidance")
-    carb.log_info("=" * 80)
+    carb.log_info("  Test omnidirectional movement (forward, strafe, rotate)")
+    carb.log_info("=" * 80 + "\n")
 
     step_count = 0
     reset_needed = False
-    last_command = [0.0, 0.0, 0.0]
+    last_command = (0.0, 0.0, 0.0)
 
     try:
         while simulation_app.is_running():
@@ -347,30 +270,37 @@ def main():
             if my_world.is_playing():
                 if reset_needed:
                     my_world.reset()
-                    my_controller.reset()
+                    motion_controller.reset()
                     reset_needed = False
                     step_count = 0
 
-                # Get keyboard command and apply to robot
-                command = keyboard_ctrl.get_command()
+                # Get keyboard command
+                vx, vy, omega = keyboard_ctrl.get_command()
 
-                # Apply command directly - no axis swapping needed with corrected mecanum angles
-                # Command format: [forward, lateral, rotation]
+                # Apply motion command using the abstracted interface
+                # This is the SAME code you'll use on the Jetson!
+                motion_controller.set_velocity(vx, vy, omega)
 
-                # Only apply command if robot exists and is valid
-                if my_lukebot:
-                    wheel_actions = my_controller.forward(command=command)
-                    my_lukebot.apply_wheel_actions(wheel_actions)
+                # Update robot pose (only needed in simulation with physics bypass)
+                # On real robot, this does nothing (motion is handled by hardware)
+                motion_controller.update(dt=1.0/60.0)  # Assuming 60 FPS
 
                 # Log command changes
-                if command != last_command and any(c != 0 for c in command):
-                    carb.log_info(f"Command: Forward={command[0]:.2f}, Lateral={command[1]:.2f}, Rotation={command[2]:.2f}")
-                    last_command = command.copy()
+                current_command = (vx, vy, omega)
+                if current_command != last_command and any(c != 0 for c in current_command):
+                    carb.log_info(f"Motion: vx={vx:.2f} m/s, vy={vy:.2f} m/s, omega={omega:.2f} rad/s")
+
+                    # Optionally log actual velocity
+                    if step_count % 30 == 0:
+                        actual_vx, actual_vy, actual_omega = motion_controller.get_actual_velocity()
+                        carb.log_info(f"  Actual: vx={actual_vx:.2f}, vy={actual_vy:.2f}, omega={actual_omega:.2f}")
+
+                    last_command = current_command
 
                 step_count += 1
 
     finally:
-        # Clean up keyboard controller
+        # Clean up
         keyboard_ctrl.shutdown()
         simulation_app.close()
 
