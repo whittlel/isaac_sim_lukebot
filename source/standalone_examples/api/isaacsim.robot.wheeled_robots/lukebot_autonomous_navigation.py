@@ -159,7 +159,7 @@ def create_detailed_environment(stage):
         UsdGeom.Xform(wall).AddScaleOp().Set(scale)
         wall.GetAttribute("primvars:displayColor").Set([(0.8, 0.8, 0.8)])
         UsdPhysics.CollisionAPI.Apply(wall)
-        UsdPhysics.RigidBodyAPI.Apply(wall)
+        # Make wall STATIC (no RigidBodyAPI = static collider)
 
     # Interior walls to create "rooms"
     interior_walls = [
@@ -175,7 +175,7 @@ def create_detailed_environment(stage):
         UsdGeom.Xform(wall).AddScaleOp().Set(scale)
         wall.GetAttribute("primvars:displayColor").Set([(0.7, 0.7, 0.7)])
         UsdPhysics.CollisionAPI.Apply(wall)
-        UsdPhysics.RigidBodyAPI.Apply(wall)
+        # Make wall STATIC (no RigidBodyAPI = static collider)
 
     # TARGET OBJECT (Yellow Cube - what the robot searches for)
     target = stage.DefinePrim("/World/Environment/TargetCube", "Cube")
@@ -183,7 +183,7 @@ def create_detailed_environment(stage):
     UsdGeom.Xform(target).AddScaleOp().Set(Gf.Vec3f(0.6, 0.6, 0.6))
     target.GetAttribute("primvars:displayColor").Set([(1.0, 1.0, 0.0)])  # Bright yellow
     UsdPhysics.CollisionAPI.Apply(target)
-    UsdPhysics.RigidBodyAPI.Apply(target)
+    # Target is STATIC so it stays in place
 
     # Obstacles (various colors and shapes)
     obstacles = [
@@ -207,7 +207,7 @@ def create_detailed_environment(stage):
         UsdGeom.Xform(obj).AddScaleOp().Set(scale)
         obj.GetAttribute("primvars:displayColor").Set([color])
         UsdPhysics.CollisionAPI.Apply(obj)
-        UsdPhysics.RigidBodyAPI.Apply(obj)
+        # Obstacles are STATIC (no RigidBodyAPI = static collider)
 
     carb.log_info("  ✓ Created detailed environment with walls and obstacles")
 
