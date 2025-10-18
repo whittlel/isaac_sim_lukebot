@@ -161,10 +161,10 @@ def create_detailed_environment(stage):
         UsdPhysics.CollisionAPI.Apply(wall)
         # Make wall STATIC (no RigidBodyAPI = static collider)
 
-    # Interior walls to create "rooms"
+    # Interior walls to create "rooms" (positioned away from robot spawn at origin)
     interior_walls = [
-        # Vertical divider
-        ("/World/Environment/DividerV1", Gf.Vec3f(0.0, 0.0, wall_height/2), Gf.Vec3f(wall_thickness, 3.0, wall_height)),
+        # Vertical divider (moved to X=2.5m to avoid robot at origin)
+        ("/World/Environment/DividerV1", Gf.Vec3f(2.5, 0.0, wall_height/2), Gf.Vec3f(wall_thickness, 3.0, wall_height)),
         # Horizontal partial wall
         ("/World/Environment/DividerH1", Gf.Vec3f(-2.0, 2.0, wall_height/2), Gf.Vec3f(2.5, wall_thickness, wall_height)),
     ]
